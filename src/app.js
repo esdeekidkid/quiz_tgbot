@@ -1,46 +1,63 @@
-const express = require('express');  // Подключаем express
-const multer = require('multer');    // Подключаем multer для обработки загрузки файлов
-const path = require('path');        // Для работы с путями
+// Подключаем необходимые библиотеки
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const cheerio = require('cheerio');
+const fs = require('fs');
+const pdf = require('pdf-parse');
 
-// Создаем экземпляр приложения Express
 const app = express();
-const port = process.env.PORT || 10000;
+const port = 10000;
 
-// Настройка хранения файлов для multer (например, загрузка PDF)
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // Папка для сохранения загруженных файлов
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname)); // Генерация уникального имени для каждого файла
+// Конфигурируем Multer для загрузки файлов
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
+// Парсим HTML для извлечения вопросов и вариантов ответов
+const parseHtmlQuiz = (html) => {
+  const $ = cheerio.load(html);
+  const questions = [];
+  
+  // Находим все вопросы и варианты ответов
+  $('div.que').each((index, element) => {
+    const question = $(element).find('.qtext').text().trim();
+    const options = [];
+    
+    $(element).find('.answer').each((i, answerElement) => {
+      options.push($(answerElement).text().trim());
+    });
+    
+    questions.push({ question, options });
+  });
+  
+  return questions;
+};
+
+// Обработка загрузки PDF
+app.post('/upload-pdf', upload.single('pdf'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).send({ error: 'No file uploaded' });
   }
+  
+  // Преобразуем PDF в текст
+  pdf(req.file.buffer).then((data) => {
+    res.json({ text: data.text });
+  }).catch((err) => {
+    res.status(500).send({ error: 'Failed to process PDF' });
+  });
 });
 
-// Мидлвар для загрузки файлов
-const upload = multer({ storage });
+// Обработка HTML-кода с вопросами
+app.post('/process-quiz', express.json(), (req, res) => {
+  const { html } = req.body;
+  const questions = parseHtmlQuiz(html);
+  res.json(questions);
+});
 
-// Статическая папка для загрузки файлов (если нужно)
+// Статический сервер для отдачи HTML страницы
 app.use(express.static('public'));
 
-// Обработчик для корневого пути "/"
-app.get('/', (req, res) => {
-  res.send('Привет, это веб-приложение для обработки тестов!');
-});
-
-// Обработчик для загрузки PDF файла
-app.post('/upload-pdf', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).send('Не выбран файл.');
-  }
-
-  // Выводим информацию о загруженном файле
-  console.log(`Файл загружен: ${req.file.filename}`);
-  res.send(`Файл "${req.file.filename}" успешно загружен!`);
-});
-
-// Дополнительные маршруты для обработки тестов могут быть добавлены здесь
-
-// Запуск приложения на порту
+// Запуск сервера
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`Server is running on port ${port}`);
 });
