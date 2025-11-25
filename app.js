@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import { PDFDocument } from 'pdf-lib';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio'; // исправление импорта
 import path from 'path';
 
 // Настройка загрузки файлов с помощью multer
