@@ -1,0 +1,14 @@
+{
+  "name": "quiz-bot",
+  "version": "1.0.0",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.1",
+    "cheerio": "^1.0.0-rc.12",
+    "string-similarity": "^4.0.0",
+    "pdfplumber": "^0.7.5"
+  }
+}
