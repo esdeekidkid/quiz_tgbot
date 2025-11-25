@@ -1,63 +1,72 @@
-// Подключаем необходимые библиотеки
+// Используем require для всех зависимостей
 const express = require('express');
 const multer = require('multer');
-const path = require('path');
-const cheerio = require('cheerio');
 const fs = require('fs');
-const pdf = require('pdf-parse');
+const { PDFDocument } = require('pdf-lib');
+const cheerio = require('cheerio');
 
 const app = express();
 const port = 10000;
 
-// Конфигурируем Multer для загрузки файлов
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
+// Настройка multer для загрузки файлов
+const upload = multer({ dest: 'uploads/' });
 
-// Парсим HTML для извлечения вопросов и вариантов ответов
-const parseHtmlQuiz = (html) => {
-  const $ = cheerio.load(html);
-  const questions = [];
-  
-  // Находим все вопросы и варианты ответов
-  $('div.que').each((index, element) => {
-    const question = $(element).find('.qtext').text().trim();
-    const options = [];
-    
-    $(element).find('.answer').each((i, answerElement) => {
-      options.push($(answerElement).text().trim());
-    });
-    
-    questions.push({ question, options });
-  });
-  
-  return questions;
-};
+// Мидлвар для парсинга JSON и статических файлов
+app.use(express.json());
+app.use(express.static('src'));
 
-// Обработка загрузки PDF
-app.post('/upload-pdf', upload.single('pdf'), (req, res) => {
+// Обработчик для загрузки PDF
+app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).send({ error: 'No file uploaded' });
+    return res.status(400).send('No file uploaded');
   }
-  
-  // Преобразуем PDF в текст
-  pdf(req.file.buffer).then((data) => {
-    res.json({ text: data.text });
-  }).catch((err) => {
-    res.status(500).send({ error: 'Failed to process PDF' });
-  });
+
+  try {
+    // Чтение и загрузка PDF
+    const pdfBytes = await fs.promises.readFile(req.file.path);
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const pages = pdfDoc.getPages();
+    const textContent = [];
+
+    // Извлечение текста с каждой страницы PDF
+    for (const page of pages) {
+      const text = await page.getTextContent();
+      textContent.push(text.items.map(item => item.str).join(' '));
+    }
+
+    // Возвращаем извлеченный текст
+    res.json({ text: textContent.join('\n') });
+  } catch (error) {
+    console.error('Error processing the PDF file:', error);
+    res.status(500).send('Error processing the PDF file');
+  }
 });
 
-// Обработка HTML-кода с вопросами
-app.post('/process-quiz', express.json(), (req, res) => {
+// Обработчик для обработки HTML кода теста
+app.post('/process-quiz', (req, res) => {
   const { html } = req.body;
-  const questions = parseHtmlQuiz(html);
+  if (!html) {
+    return res.status(400).send('HTML code is required');
+  }
+
+  // Использование cheerio для парсинга HTML
+  const $ = cheerio.load(html);
+  const questions = [];
+
+  // Пример обработки вопросов из HTML
+  $('div.que').each((index, element) => {
+    const questionText = $(element).find('.content').text().trim();
+    const options = [];
+    $(element).find('.answer').each((_, option) => {
+      options.push($(option).text().trim());
+    });
+    questions.push({ question: questionText, options });
+  });
+
   res.json(questions);
 });
 
-// Статический сервер для отдачи HTML страницы
-app.use(express.static('public'));
-
 // Запуск сервера
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
