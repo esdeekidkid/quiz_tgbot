@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quiz Web App</title>
+</head>
+<body>
+  <h1>Quiz Web App</h1>
+
+  <form id="pdfForm" enctype="multipart/form-data">
+    <label for="pdf">Upload PDF:</label>
+    <input type="file" id="pdf" name="pdf" accept=".pdf" required>
+    <button type="submit">Upload</button>
+  </form>
+
+  <form id="htmlForm">
+    <label for="html">HTML Code of Quiz:</label>
+    <textarea id="html" name="html" rows="10" cols="50" required></textarea>
+    <button type="submit">Submit HTML</button>
+  </form>
+
+  <div id="output"></div>
+
+  <script>
+    document.getElementById('pdfForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const formData = new FormData();
+      formData.append('pdf', document.getElementById('pdf').files[0]);
+      const response = await fetch('/upload-pdf', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+      document.getElementById('output').textContent = data.text;
+    };
+
+    document.getElementById('htmlForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const html = document.getElementById('html').value;
+      const response = await fetch('/process-quiz', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ html })
+      });
+      const questions = await response.json();
+      document.getElementById('output').textContent = JSON.stringify(questions, null, 2);
+    };
+  </script>
+</body>
+</html>
