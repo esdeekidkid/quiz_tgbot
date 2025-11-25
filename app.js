@@ -1,58 +1,78 @@
 import express from 'express';
-import { parseQuizPage } from './parser.js';
-import { getBestAnswer } from './answerEngine.js';
-import { extractPdfText } from './utils/pdfReader.js';
+import multer from 'multer';
+import fs from 'fs';
+import { PDFDocument } from 'pdf-lib';
+import cheerio from 'cheerio';
+import path from 'path';
+
+// Настройка загрузки файлов с помощью multer
+const upload = multer({ dest: 'uploads/' });
 
 const app = express();
-app.use(express.json());
+const port = process.env.PORT || 3000;
 
-const LECTURES = {};
+let lectureText = ''; // Для хранения текста из PDF
 
-// Загружаем PDF файл и извлекаем текст
-app.post('/upload-pdf', async (req, res) => {
-    const { pdfFile } = req.body;
-    const chatId = req.body.chatId;
+// Функция для извлечения текста из PDF
+async function extractPdfText(pdfFilePath) {
+    const existingPdfBytes = fs.readFileSync(pdfFilePath);
+    const pdfDoc = await PDFDocument.load(existingPdfBytes);
+    let text = '';
 
-    if (!pdfFile) {
-        return res.status(400).send("No PDF file provided");
-    }
-
-    try {
-        const pdfText = await extractPdfText(pdfFile);
-        LECTURES[chatId] = pdfText;
-        res.send("Lecture PDF uploaded successfully!");
-    } catch (error) {
-        res.status(500).send("Error extracting PDF text");
-    }
-});
-
-// Получаем HTML код теста и находим ответы
-app.post('/process-test', (req, res) => {
-    const { html, chatId } = req.body;
-    
-    if (!html || !LECTURES[chatId]) {
-        return res.status(400).send("No test HTML or lecture found");
-    }
-
-    // Парсим HTML страницы с тестом
-    const questions = parseQuizPage(html);
-    const answers = questions.map(q => {
-        if (q.options.length > 0) {
-            return {
-                question: q.question,
-                answer: getBestAnswer(q.question, q.options, LECTURES[chatId])
-            };
-        } else {
-            return {
-                question: q.question,
-                answer: getBestAnswer(q.question, [], LECTURES[chatId])  // для открытых вопросов
-            };
-        }
+    const pages = pdfDoc.getPages();
+    pages.forEach(page => {
+        const pageText = page.getTextContent(); // Извлекаем текст
+        text += pageText;
     });
 
-    res.json(answers);
+    return text;
+}
+
+// Функция для извлечения вопросов и вариантов ответов из HTML
+function extractQuestionsFromHtml(html) {
+    const $ = cheerio.load(html);
+    const questions = [];
+
+    $('.que').each((index, element) => {
+        const questionText = $(element).find('.qtext').text().trim();
+        const options = [];
+
+        $(element).find('.answer input').each((i, el) => {
+            options.push($(el).parent().text().trim());
+        });
+
+        questions.push({ question: questionText, options: options });
+    });
+
+    return questions;
+}
+
+// Маршрут для загрузки PDF
+app.post('/upload-pdf', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('No file uploaded.');
+    }
+
+    const pdfFilePath = path.join(__dirname, req.file.path);
+    lectureText = await extractPdfText(pdfFilePath);
+
+    res.send('PDF uploaded and text extracted!');
 });
 
-app.listen(3000, () => {
-    console.log('Server running on port 3000');
+// Маршрут для обработки HTML теста
+app.post('/submit-test', express.text(), (req, res) => {
+    if (!lectureText) {
+        return res.status(400).send('No lecture data found. Please upload a PDF first.');
+    }
+
+    const html = req.body; // Получаем HTML-код из тела запроса
+    const questions = extractQuestionsFromHtml(html);
+
+    // Возвращаем извлеченные вопросы и ответы
+    res.json({ questions });
+});
+
+// Запуск сервера
+app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
 });
