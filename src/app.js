@@ -1,74 +1,46 @@
-// Используем require вместо import
-const express = require('express');
-const multer = require('multer');
-const cheerio = require('cheerio');
-const fs = require('fs');
-const { PDFDocument } = require('pdf-lib');
-const axios = require('axios');
-const path = require('path');
+const express = require('express');  // Подключаем express
+const multer = require('multer');    // Подключаем multer для обработки загрузки файлов
+const path = require('path');        // Для работы с путями
 
+// Создаем экземпляр приложения Express
 const app = express();
-const port = 10000;
+const port = process.env.PORT || 10000;
 
-// Настройка multer для загрузки файлов
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
+// Настройка хранения файлов для multer (например, загрузка PDF)
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/'); // Папка для сохранения загруженных файлов
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + path.extname(file.originalname)); // Генерация уникального имени для каждого файла
+  }
+});
 
-// Папка для хранения загруженных файлов
-const uploadFolder = 'uploads';
+// Мидлвар для загрузки файлов
+const upload = multer({ storage });
 
-// Убедитесь, что папка существует
-if (!fs.existsSync(uploadFolder)) {
-  fs.mkdirSync(uploadFolder);
-}
+// Статическая папка для загрузки файлов (если нужно)
+app.use(express.static('public'));
 
-// Путь для обработки POST-запроса с PDF-файлом
+// Обработчик для корневого пути "/"
+app.get('/', (req, res) => {
+  res.send('Привет, это веб-приложение для обработки тестов!');
+});
+
+// Обработчик для загрузки PDF файла
 app.post('/upload-pdf', upload.single('file'), (req, res) => {
   if (!req.file) {
-    return res.status(400).send('No file uploaded.');
+    return res.status(400).send('Не выбран файл.');
   }
 
-  const pdfBuffer = req.file.buffer;
-  (async () => {
-    try {
-      // Обработка PDF с использованием pdf-lib
-      const pdfDoc = await PDFDocument.load(pdfBuffer);
-      const pages = pdfDoc.getPages();
-      const firstPage = pages[0];
-      const text = firstPage.getTextContent();
-
-      console.log('PDF text:', text); // Логируем текст из PDF
-
-      res.status(200).send('PDF uploaded and processed.');
-    } catch (error) {
-      console.error('Error processing PDF:', error);
-      res.status(500).send('Error processing PDF.');
-    }
-  })();
+  // Выводим информацию о загруженном файле
+  console.log(`Файл загружен: ${req.file.filename}`);
+  res.send(`Файл "${req.file.filename}" успешно загружен!`);
 });
 
-// Путь для обработки POST-запроса с HTML-кодом страницы теста
-app.post('/process-html', express.text(), (req, res) => {
-  const html = req.body;
-  const $ = cheerio.load(html);
-  
-  // Пример парсинга HTML с использованием cheerio
-  const questions = [];
-  $('div.que').each((index, element) => {
-    const questionText = $(element).find('.qtext').text().trim();
-    const options = [];
-    $(element).find('.answer').each((i, ans) => {
-      options.push($(ans).text().trim());
-    });
-    questions.push({ question: questionText, options });
-  });
+// Дополнительные маршруты для обработки тестов могут быть добавлены здесь
 
-  console.log('Parsed questions:', questions); // Логируем вопросы
-
-  res.status(200).json(questions);
-});
-
-// Запуск сервера
+// Запуск приложения на порту
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
