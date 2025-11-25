@@ -1,47 +1,46 @@
-<!-- public/index.html -->
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Quiz evaluator</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Quiz Helper</title>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <div class="container">
-    <h1>Quiz helper — оценка ответов по лекции</h1>
+  <div class="wrap">
+    <header>
+      <h1>Quiz Helper</h1>
+      <p class="subtitle">Загрузи PDF-лекцию → вставь HTML теста → получи ответы</p>
+    </header>
 
-    <section class="card">
-      <h2>1) Загрузить PDF (опционально)</h2>
-      <p>Если загрузить PDF, сервер попытается извлечь текст (требует <code>pdf-parse</code>). Можно также заранее отправить текст лекции.</p>
-      <form id="pdfForm">
-        <input type="file" id="pdfFile" name="pdf" accept=".pdf">
-        <button type="submit">Загрузить PDF</button>
+    <section class="panel">
+      <h2>1) Загрузить PDF лекцию</h2>
+      <form id="pdfForm" class="row">
+        <input type="file" id="pdf" name="pdf" accept=".pdf" required />
+        <button type="submit" class="btn">Загрузить</button>
       </form>
-      <div id="pdfStatus" class="info"></div>
-      <div class="note">Или установите текст лекции напрямую (ниже).</div>
+      <div id="pdfStatus" class="status">Статус: нет загруженной лекции</div>
     </section>
 
-    <section class="card">
-      <h2>2) Вставить / вставь JSON вопросов</h2>
-      <textarea id="jsonInput" rows="10" placeholder='{"items":[ { "question":"...", "options":["...","..."] } ]}'></textarea>
-      <div class="row">
-        <button id="evalBtn">Evaluate</button>
-        <button id="setPdfTextBtn">Установить pdfText (текст лекции)</button>
+    <section class="panel">
+      <h2>2) Вставь HTML-код страницы с тестом</h2>
+      <textarea id="htmlInput" placeholder="Вставь HTML код страницы с тестом сюда..." rows="12"></textarea>
+      <div class="controls">
+        <button id="processBtn" class="btn primary">Обработать тест</button>
+        <button id="clearBtn" class="btn">Очистить</button>
       </div>
-      <textarea id="pdfTextInput" rows="5" placeholder="Если у тебя есть текст лекции, вставь его сюда (опционально)"></textarea>
     </section>
 
-    <section class="card">
-      <h2>3) Результаты</h2>
+    <section class="panel">
+      <h2>Результат</h2>
       <div id="results"></div>
     </section>
 
-    <footer class="muted">
-      <small>Лёгкий локальный алгоритм: токенизация + n-gram + Levenshtein. Работает экономно (≤512MB).</small>
+    <footer>
+      <small>Лёгкий поиск: точные вхождения + похожесть (включая Levenshtein). Поддержка открытых вопросов.</small>
     </footer>
   </div>
 
-  <script src="script.js"></script>
+  <script src="/script.js"></script>
 </body>
 </html>
