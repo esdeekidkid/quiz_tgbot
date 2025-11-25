@@ -1,14 +1,17 @@
 {
   "name": "quiz-bot",
   "version": "1.0.0",
+  "description": "Bot for processing quiz questions from PDF and HTML",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "build": "npm install"
   },
   "dependencies": {
     "express": "^4.18.1",
     "cheerio": "^1.0.0-rc.12",
     "string-similarity": "^4.0.0",
-    "pdfplumber": "^0.7.5"
+    "pdf-lib": "^1.17.1",
+    "multer": "^1.4.5-lts.1"
   }
 }
