@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Quiz helper</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:12px}
+    textarea{width:100%;min-height:220px}
+    .question{border:1px solid #ddd;padding:10px;margin:8px 0;border-radius:6px}
+    .opt{padding:6px;border-radius:4px;margin:6px 0}
+    .correct{background:#e6ffea;border:1px solid #7ee08b}
+    .maybe{background:#fffbe6;border:1px solid #ffd86b}
+    .snippet{font-size:0.9em;color:#444;margin-top:6px}
+    .controls{display:flex;gap:8px;margin-bottom:12px}
+  </style>
+</head>
+<body>
+  <h1>Quiz helper — загрузите PDF и вставьте HTML теста</h1>
+
+  <div class="controls">
+    <form id="pdfForm" enctype="multipart/form-data" style="display:flex;gap:8px;align-items:center">
+      <input type="file" id="pdf" name="pdf" accept=".pdf" required />
+      <button type="submit">Загрузить PDF</button>
+    </form>
+    <button id="clearBtn">Очистить загруженную лекцию</button>
+  </div>
+
+  <div>
+    <label for="html">HTML страницы с тестом (вставьте весь HTML):</label>
+    <textarea id="html" placeholder="Вставьте HTML тут"></textarea>
+    <div style="margin-top:8px">
+      <button id="processBtn">Обработать тест</button>
+    </div>
+  </div>
+
+  <h2>Результат</h2>
+  <div id="output"></div>
+
+  <script>
+    const pdfForm = document.getElementById('pdfForm');
+    pdfForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const f = document.getElementById('pdf').files[0];
+      if (!f) { alert('Выберите PDF'); return; }
+      const fd = new FormData();
+      fd.append('pdf', f);
+      const res = await fetch('/upload-pdf', { method: 'POST', body: fd });
+      const j = await res.json();
+      if (!j.ok) alert('Ошибка загрузки: ' + (j.error||'unknown'));
+      else alert('PDF загружен. Сниппет: ' + (j.textSnippet||'(пусто)'));
+    };
+
+    document.getElementById('clearBtn').onclick = async () => {
+      await fetch('/clear-lecture', { method: 'POST' }).catch(()=>{});
+      alert('Лекция очищена (локально). Повторно загрузите PDF.');
+    };
+
+    async function renderResults(json) {
+      const out = document.getElementById('output');
+      out.innerHTML = '';
+      if (!json.results) { out.textContent = JSON.stringify(json); return; }
+      for (const q of json.results) {
+        const d = document.createElement('div');
+        d.className = 'question';
+        const title = document.createElement('div');
+        title.innerHTML = `<strong>Вопрос:</strong> ${q.question}`;
+        d.appendChild(title);
+
+        if (q.type === 'shortanswer') {
+          const ans = document.createElement('div');
+          ans.innerHTML = `<strong>Ответ:</strong> ${q.answer || '<i>Не найдено</i>'} <span style="color:#666"> (confidence: ${q.confidence||0})</span>`;
+          d.appendChild(ans);
+          if (q.snippet) {
+            const sn = document.createElement('div');
+            sn.className = 'snippet';
+            sn.textContent = q.snippet;
+            d.appendChild(sn);
+          }
+        } else {
+          for (const opt of q.options) {
+            const el = document.createElement('div');
+            el.className = 'opt ' + (opt.predicted_correct ? 'correct' : (opt.score>0.35 ? 'maybe' : ''));
+            el.innerHTML = `<div><strong>${opt.text}</strong> — score: ${opt.score}</div>`;
+            if (opt.snippet) {
+              const sn = document.createElement('div');
+              sn.className = 'snippet';
+              sn.textContent = opt.snippet;
+              el.appendChild(sn);
+            }
+            d.appendChild(el);
+          }
+        }
+        out.appendChild(d);
+      }
+    }
+
+    document.getElementById('processBtn').onclick = async () => {
+      const html = document.getElementById('html').value;
+      if (!html) { alert('Вставьте HTML страницы теста'); return; }
+      const res = await fetch('/process-quiz', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ html })
+      });
+      const j = await res.json();
+      if (!j.ok) {
+        if (j.error) alert('Ошибка: ' + j.error);
+        else alert('Неожиданная ошибка');
+        return;
+      }
+      renderResults(j);
+    };
+  </script>
+</body>
+</html>
