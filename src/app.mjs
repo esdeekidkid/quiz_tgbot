@@ -6,7 +6,7 @@ import fs from 'fs';
 import * as cheerio from 'cheerio';
 
 // --- PDF ---
-import * as pdfjsLib from 'pdfjs-dist';
+import pdfParse from 'pdf-parse';
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -203,34 +203,16 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Нет файла' });
 
-    // Установим workerSrc только когда он понадобится
-    if (!pdfjsLib.GlobalWorkerOptions?.workerSrc) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `node_modules/pdfjs-dist/build/pdf.worker.js`;
-    }
-
-    const arrayBuffer = req.file.buffer.buffer.slice(
-      req.file.buffer.byteOffset,
-      req.file.buffer.byteOffset + req.file.buffer.byteLength
-    );
-
-    const pdf = await pdfjsLib.getDocument({  arrayBuffer }).promise;
-    let fullText = '';
-
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      const page = await pdf.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageText = textContent.items.map(s => s.str).join(' ');
-      fullText += pageText + ' ';
-    }
-
+    const data = await pdfParse(req.file.buffer);
+    const text = (data && data.text) ? data.text : '';
     const sessionKey = req.ip || 'default';
-    LECTURES[sessionKey] = normalizeText(fullText);
+    LECTURES[sessionKey] = normalizeText(text);
 
     // Возвращаем длину и первый фрагмент текста для отладки
     return res.json({
       ok: true,
-      length: fullText.length,
-      snippet: fullText.substring(0, 200)
+      length: text.length,
+      snippet: text.substring(0, 200)
     });
   } catch (err) {
     console.error('upload-pdf error', err);
