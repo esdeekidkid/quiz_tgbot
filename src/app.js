@@ -4,7 +4,11 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cheerio = require('cheerio');
-const pdfParse = require('pdf-parse');
+
+// --- PDF ---
+const pdfjsLib = require('pdfjs-dist');
+// Установите worker для Node.js
+pdfjsLib.GlobalWorkerOptions.workerSrc = require('pdfjs-dist/build/pdf.worker.js');
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -200,12 +204,31 @@ function parseHtmlQuiz(html) {
 app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Нет файла' });
-    const buf = req.file.buffer;
-    const data = await pdfParse(buf);
-    const text = (data && data.text) ? data.text : '';
+
+    const arrayBuffer = req.file.buffer.buffer.slice(
+      req.file.buffer.byteOffset,
+      req.file.buffer.byteOffset + req.file.buffer.byteLength
+    );
+
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(s => s.str).join(' ');
+      fullText += pageText + ' ';
+    }
+
     const sessionKey = req.ip || 'default';
-    LECTURES[sessionKey] = normalizeText(text);
-    return res.json({ ok: true, length: text.length });
+    LECTURES[sessionKey] = normalizeText(fullText);
+
+    // Возвращаем длину и первый фрагмент текста для отладки
+    return res.json({
+      ok: true,
+      length: fullText.length,
+      snippet: fullText.substring(0, 200)
+    });
   } catch (err) {
     console.error('upload-pdf error', err);
     return res.status(500).json({ error: 'Ошибка разбора PDF', detail: err.message });
