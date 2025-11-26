@@ -6,11 +6,11 @@ import fs from 'fs';
 import * as cheerio from 'cheerio';
 
 // --- PDF ---
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
+import * as pdfjsLib from 'pdfjs-dist';
 
 // Установите worker для Node.js
-// Попробуем использовать строку напрямую, а не через import.meta.url
-pdfjsLib.GlobalWorkerOptions.workerSrc = `node_modules/pdfjs-dist/legacy/build/pdf.worker.js`;
+// Для версии 2.16.105 workerSrc доступен
+pdfjsLib.GlobalWorkerOptions.workerSrc = `node_modules/pdfjs-dist/build/pdf.worker.js`;
 
 const app = express();
 const port = process.env.PORT || 10000;
