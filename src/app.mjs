@@ -1,21 +1,21 @@
-// src/app.js
-const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const cheerio = require('cheerio');
+// src/app.mjs
+import express from 'express';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import * as cheerio from 'cheerio';
 
 // --- PDF ---
-const pdfjsLib = require('pdfjs-dist');
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
 // Установите worker для Node.js
-pdfjsLib.GlobalWorkerOptions.workerSrc = require('pdfjs-dist/build/pdf.worker.js');
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/legacy/build/pdf.worker.js', import.meta.url).toString();
 
 const app = express();
 const port = process.env.PORT || 10000;
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Multer (в памяти, чтобы не хранить много файлов на диске)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB limit
@@ -210,7 +210,7 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
       req.file.buffer.byteOffset + req.file.buffer.byteLength
     );
 
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await pdfjsLib.getDocument({  arrayBuffer }).promise;
     let fullText = '';
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -368,7 +368,7 @@ app.post('/process-quiz', async (req, res) => {
 
 // simple index
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
 });
 
 // start
