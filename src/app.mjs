@@ -6,11 +6,7 @@ import fs from 'fs';
 import * as cheerio from 'cheerio';
 
 // --- PDF ---
-import * as pdfjsLib from 'pdfjs-dist/webpack';
-
-// Установите worker для Node.js
-// Для версии 2.16.105 через webpack путь
-pdfjsLib.GlobalWorkerOptions.workerSrc = `node_modules/pdfjs-dist/webpack/pdf.worker.js`;
+import * as pdfjsLib from 'pdfjs-dist';
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -206,6 +202,11 @@ function parseHtmlQuiz(html) {
 app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Нет файла' });
+
+    // Установим workerSrc только когда он понадобится
+    if (!pdfjsLib.GlobalWorkerOptions?.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `node_modules/pdfjs-dist/build/pdf.worker.js`;
+    }
 
     const arrayBuffer = req.file.buffer.buffer.slice(
       req.file.buffer.byteOffset,
