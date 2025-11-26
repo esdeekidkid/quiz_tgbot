@@ -1,28 +1,26 @@
-// src/app.mjs
-import express from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import * as cheerio from 'cheerio';
-
-// --- PDF ---
-import pdfParse from 'pdf-parse';
+// src/app.js
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const pdfParse = require('pdf-parse');
+const cheerio = require('cheerio');
 
 const app = express();
 const port = process.env.PORT || 10000;
 
+// --- Middleware ---
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-app.use(express.static(path.join(process.cwd(), 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// Multer (в памяти, чтобы не хранить много файлов на диске)
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB limit
+// --- Storage ---
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB
 
-// Хранилище одной сессии: для простоты — хранит последнюю лекцию для каждой сессии (по IP)
-// (можно заменить на chat_id, если используешь бота)
-const LECTURES = {}; // { sessionKey: lectureText }
+// --- Session storage ---
+const LECTURES = {};
 
-// ---- UTILS ----
+// --- Utils ---
 function normalizeText(s) {
   if (!s) return '';
   return s.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -35,54 +33,21 @@ function excerptAround(text, idx, len = 120) {
   return text.substring(start, end).replace(/\s+/g, ' ');
 }
 
-function findDefinitionInLecture(lecture, term) {
-  // ищем "TERM - это", "TERM — это", "TERM это", "это TERM" и т.д.
-  const L = lecture;
-  const termEsc = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regexes = [
-    new RegExp(`([А-Яа-яA-Za-z0-9\\-\\s]{1,80})[\\-—]\\s*это`, 'gi'),
-    new RegExp(`(${termEsc})\\s*(?:[:\\-—])\\s*это`, 'i'),
-    new RegExp(`${termEsc}\\s+представляет собой`, 'i'),
-    new RegExp(`это\\s+(${termEsc})`, 'i'),
-  ];
-
-  for (const r of regexes) {
-    const m = r.exec(L);
-    if (m) {
-      return {
-        found: true,
-        match: m[0],
-        snippet: excerptAround(L, Math.max(0, m.index)),
-      };
-    }
-  }
-  return { found: false };
-}
-
 function scoreOptionByLecture(lecture, option) {
-  // несколько признаков:
-  // 1) точное вхождение опции
-  // 2) все слова опции по отдельности (пересечение)
-  // 3) совпадение фразы "X представляет собой" или "X - это"
   const L = normalizeText(lecture);
   const opt = normalizeText(option);
 
   let score = 0;
-  const snippets = [];
 
   // exact phrase occurrences
   const exactCount = (L.match(new RegExp(opt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
   if (exactCount > 0) {
     score += 3 * Math.log(1 + exactCount);
-    const idx = L.indexOf(opt);
-    snippets.push({ why: 'exact', excerpt: excerptAround(L, idx) });
   }
 
-  // phrase like "opt представляет собой" or "opt - это"
+  // definition patterns
   if (new RegExp(opt + '\\s+(представляет собой|является|это|характеризуется|обозначает|означает)', 'i').test(lecture)) {
     score += 3;
-    const idx = L.search(new RegExp(opt + '\\s+(представляет собой|является|это|характеризуется|обозначает|означает)', 'i'));
-    snippets.push({ why: 'definition', excerpt: excerptAround(L, idx) });
   }
 
   // word overlap
@@ -97,69 +62,44 @@ function scoreOptionByLecture(lecture, option) {
   if (optWords.length > 0) {
     const ratio = matchedWords / optWords.length;
     score += ratio * 2;
-    if (ratio > 0) snippets.push({ why: 'words', matched: matchedWords + '/' + optWords.length });
   }
 
-  // small boost for longer option that appears at least once
-  if (opt.length > 30 && exactCount > 0) score += 0.5;
-
-  return { score, snippets };
+  return score;
 }
 
-// Определение типа вопроса по тексту вопроса (русский)
 function detectQuestionType(qtext) {
   const q = normalizeText(qtext);
-  // single-choice markers
   const singleMarkers = ['какое из', 'какой из', 'как называется', 'что из', 'выберите один', 'выберите', 'какое слово пропущено'];
   for (const m of singleMarkers) if (q.includes(m)) return 'single';
 
-  // multi-choice / classification / перечисление
   const multiMarkers = ['какие', 'перечисл', 'классификация', 'входят в', 'относятся', 'какие действия', 'назовите', 'перечислите', 'признаков', 'включают'];
   for (const m of multiMarkers) if (q.includes(m)) return 'multi';
 
-  // units / "единицы измерения"
   if (q.includes('единиц') || q.includes('единицы измерения') || q.includes('единицы')) return 'units';
 
-  // open short answer (input)
   if (/(какое слово пропущено|какое слово|впишите|введите|короткий ответ|ответ)/i.test(qtext)) return 'short';
 
-  // fallback: if question length is long and contains 'что' or 'определ', treat as single
   if (q.includes('что') || q.includes('определ')) return 'single';
 
-  // default
   return 'single';
 }
 
-// Парсер HTML теста (Moodle-like) -> возвращает [{question, options[], isShort}]
 function parseHtmlQuiz(html) {
   const $ = cheerio.load(html);
   const questions = [];
 
-  // каждая секция .que
   $('.que').each((i, el) => {
     const q = {};
     q.raw = $(el).html() || '';
-    // Вопрос текст: .qtext p (или .qtext)
     const qtext = $(el).find('.qtext').text() || $(el).find('h4').text() || $(el).text();
     q.question = qtext.replace(/\s+/g, ' ').trim();
 
-    // Опции: .answer p, .answer .r0/.r1 .flex-fill p, или input labels
     const opts = [];
     $(el).find('.answer').find('p').each((j, p) => {
       const t = $(p).text().replace(/\s+/g, ' ').trim();
       if (t) opts.push(t);
     });
 
-    // также ищем элементы answer-label
-    $(el).find('[data-region="answer-label"]').each((j, lab) => {
-      const t = $(lab).text().replace(/\s+/g, ' ').trim();
-      if (t) opts.push(t);
-    });
-
-    // если специальные элементы input type=text => short answer
-    const isShort = !!$(el).find('input[type="text"]').length || $(el).hasClass('shortanswer');
-
-    // fallback: try to read checkbox labels directly
     if (opts.length === 0) {
       $(el).find('input[type="checkbox"], input[type="radio"]').each((j, inp) => {
         const id = $(inp).attr('id');
@@ -170,13 +110,11 @@ function parseHtmlQuiz(html) {
       });
     }
 
-    // dedupe and trim options
     q.options = Array.from(new Set(opts.map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean)));
-    q.isShort = isShort;
+    q.isShort = !!$(el).find('input[type="text"]').length || $(el).hasClass('shortanswer');
     questions.push(q);
   });
 
-  // если не нашло .que - попытаться извлечь вручную: ищем все <fieldset class="ablock"> и qtext перед ними
   if (questions.length === 0) {
     $('fieldset.ablock').each((i, f) => {
       const q = {};
@@ -196,9 +134,8 @@ function parseHtmlQuiz(html) {
   return questions;
 }
 
-// ---- ROUTES ----
+// --- Routes ---
 
-// Upload PDF lecture
 app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Нет файла' });
@@ -208,7 +145,6 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
     const sessionKey = req.ip || 'default';
     LECTURES[sessionKey] = normalizeText(text);
 
-    // Возвращаем длину и первый фрагмент текста для отладки
     return res.json({
       ok: true,
       length: text.length,
@@ -220,7 +156,6 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   }
 });
 
-// Process quiz HTML
 app.post('/process-quiz', async (req, res) => {
   try {
     const sessionKey = req.ip || 'default';
@@ -239,50 +174,17 @@ app.post('/process-quiz', async (req, res) => {
       const type = detectQuestionType(qtext);
       const opts = q.options || [];
 
-      // Short open-answer handling
       if (q.isShort || type === 'short') {
-        // try to find definition in lecture: pattern "XXX - это ..." or "XXX — это ..."
-        // also try to find phrase in lecture that continues the phrase of question
-        // We'll try several heuristics
         const lec = lectureText;
-        // 1) search for "— это" or "- это"
         const defRegex = /([А-Яа-яЁёA-Za-z0-9 \-]{2,80})\s*[—\-:]\s*это/gi;
         let m;
         let found = null;
         while ((m = defRegex.exec(lec)) !== null) {
-          // pick the first reasonable match which isn't too long
           const cand = m[1].trim();
           if (cand.split(/\s+/).length <= 6) {
             found = { answer: cand, excerpt: excerptAround(lec, m.index) };
             break;
           }
-        }
-
-        // 2) fallback: look for pattern "Статическое электричество - это ..." (term preceding " - это")
-        if (!found) {
-          // try to extract noun before 'это' using small regex
-          const r2 = /([А-Яа-яЁёA-Za-z0-9 \-]{2,60})\s+это\s+/gi;
-          const m2 = r2.exec(lec);
-          if (m2) found = { answer: m2[1].trim(), excerpt: excerptAround(lec, m2.index) };
-        }
-
-        // 3) also try to find the longest capitalized phrase followed by '-' or '—'
-        if (!found) {
-          const r3 = /([А-ЯЁ][А-Яа-яё'\-\s]{2,80})\s*[—\-:]\s*это/gi;
-          const m3 = r3.exec(lec);
-          if (m3) found = { answer: m3[1].trim(), excerpt: excerptAround(lec, m3.index) };
-        }
-
-        // 4) if none found, try to match candidate tokens from question with lecture to return best snippet
-        if (!found) {
-          // try to pick a short noun phrase from lecture that includes a word near "электрическ", etc.
-          const qwords = normalizeText(qtext).split(/\s+/).slice(0, 6).filter(Boolean);
-          let bestIdx = -1, bestLen = 0;
-          for (const w of qwords) {
-            const idx = lectureText.indexOf(w);
-            if (idx >= 0 && w.length > bestLen) { bestIdx = idx; bestLen = w.length; }
-          }
-          if (bestIdx >= 0) found = { answer: lectureText.substr(bestIdx, 50).trim(), excerpt: excerptAround(lectureText, bestIdx) };
         }
 
         results.push({
@@ -295,33 +197,25 @@ app.post('/process-quiz', async (req, res) => {
         continue;
       }
 
-      // For questions with options:
       const scored = [];
       for (const opt of opts) {
-        const r = scoreOptionByLecture(lectureText, opt);
-        scored.push({ option: opt, score: r.score, snippets: r.snippets });
+        const score = scoreOptionByLecture(lectureText, opt);
+        scored.push({ option: opt, score });
       }
 
-      // normalize scores to [0..1]
       const maxScore = scored.reduce((m, s) => Math.max(m, s.score), 0) || 1;
       scored.forEach(s => s.norm = +(s.score / maxScore).toFixed(3));
 
-      // decide selection policy based on type
       let selected = [];
       if (type === 'single') {
-        // choose ONLY top option
         const top = scored.slice().sort((a, b) => b.score - a.score)[0];
-        if (top) selected = [{ option: top.option, score: top.norm, snippets: top.snippets }];
+        if (top) selected = [{ option: top.option, score: top.norm }];
       } else if (type === 'units') {
-        // return options that have at least some match (norm > 0.1)
         selected = scored.filter(s => s.norm >= 0.15).sort((a, b) => b.norm - a.norm);
       } else {
-        // multi / classification: allow multiple answers
-        // pick those with norm >= 0.55 * max, or norm >= 0.25 and >0 (heuristic)
         const thresh = 0.55;
         const candidates = scored.filter(s => s.norm >= thresh);
         if (candidates.length === 0) {
-          // fallback: take any with norm >= 0.25
           const fallback = scored.filter(s => s.norm >= 0.25);
           selected = fallback.sort((a, b) => b.norm - a.norm);
         } else {
@@ -329,18 +223,11 @@ app.post('/process-quiz', async (req, res) => {
         }
       }
 
-      // create "found" snippets text
-      const formatted = scored.map(s => ({
-        option: s.option,
-        norm: s.norm,
-        snippets: s.snippets,
-      }));
-
       results.push({
         question: qtext,
         type,
-        options: formatted,
-        selected: selected.map(s => ({ option: s.option, score: s.norm, snippets: s.snippets })),
+        options: scored,
+        selected: selected.map(s => ({ option: s.option, score: s.norm })),
       });
     }
 
@@ -351,12 +238,10 @@ app.post('/process-quiz', async (req, res) => {
   }
 });
 
-// simple index
 app.get('/', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
-// start
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
