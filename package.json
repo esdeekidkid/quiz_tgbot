@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "",
   "main": "src/app.mjs",
-  "type": "module",  // <-- ВАЖНО
+  "type": "module",
   "scripts": {
     "start": "node src/app.mjs",
     "dev": "node src/app.mjs"
