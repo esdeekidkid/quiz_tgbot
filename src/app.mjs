@@ -6,10 +6,12 @@ import fs from 'fs';
 import * as cheerio from 'cheerio';
 
 // --- PDF ---
-import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
+
 // Установите worker для Node.js
 // Используем абсолютный путь через import.meta.url
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('node_modules/pdfjs-dist/build/pdf.worker.js', import.meta.url).href;
+const __dirname = new URL('.', import.meta.url).pathname;
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('node_modules/pdfjs-dist/legacy/build/pdf.worker.js', import.meta.url).href;
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -341,38 +343,4 @@ app.post('/process-quiz', async (req, res) => {
           const fallback = scored.filter(s => s.norm >= 0.25);
           selected = fallback.sort((a, b) => b.norm - a.norm);
         } else {
-          selected = candidates.sort((a, b) => b.norm - a.norm);
-        }
-      }
-
-      // create "found" snippets text
-      const formatted = scored.map(s => ({
-        option: s.option,
-        norm: s.norm,
-        snippets: s.snippets,
-      }));
-
-      results.push({
-        question: qtext,
-        type,
-        options: formatted,
-        selected: selected.map(s => ({ option: s.option, score: s.norm, snippets: s.snippets })),
-      });
-    }
-
-    return res.json({ ok: true, results });
-  } catch (err) {
-    console.error('process-quiz error', err);
-    return res.status(500).json({ error: 'Ошибка обработки', detail: err.message });
-  }
-});
-
-// simple index
-app.get('/', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
-});
-
-// start
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+          selected = candidates
