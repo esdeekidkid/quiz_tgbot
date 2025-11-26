@@ -1,302 +1,314 @@
 const express = require('express');
 const multer = require('multer');
-const fs = require('fs');
-const cheerio = require('cheerio');
-const pdfParse = require('pdf-parse');
 const path = require('path');
+const cheerio = require('cheerio');
+const fs = require('fs');
+const pdfParse = require('pdf-parse');
 
 const app = express();
 const port = process.env.PORT || 10000;
 
-let pdfText = ""; // нормализованный весь текст
-let rawPdfText = ""; // оригинальный извлечённый текст для evidence
+// === storage for multer: simple disk storage in uploads/ ===
+const uploadDir = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
-const upload = multer({ dest: 'uploads/' });
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, '../public')));
-
-// --------- утилиты ----------
-function normalize(s) {
-  if (!s) return "";
-  return s.toString()
-    .toLowerCase()
-    .replace(/[\u2018\u2019\u201c\u201d«»]/g, '"')
-    .replace(/ё/g, 'е')
-    .replace(/[^\wа-яё0-9\s\-]/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function levenshtein(a, b) {
-  a = a || ''; b = b || '';
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  const dp = Array(n + 1);
-  for (let j = 0; j <= n; j++) dp[j] = j;
-  for (let i = 1; i <= m; i++) {
-    let prev = dp[0];
-    dp[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const temp = dp[j];
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
-      prev = temp;
-    }
-  }
-  return dp[n];
-}
-
-function wordOverlapScore(a, b) {
-  if (!a || !b) return 0;
-  const A = new Set(normalize(a).split(' ').filter(Boolean));
-  const B = new Set(normalize(b).split(' ').filter(Boolean));
-  if (A.size === 0 || B.size === 0) return 0;
-  let common = 0;
-  for (const w of A) if (B.has(w)) common++;
-  return common / Math.max(A.size, B.size);
-}
-
-// разбиваем rawPdfText на короткие фрагменты (строки/предложения) для evidence
-function makeFragments(rawText) {
-  if (!rawText) return [];
-  const byLine = rawText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const fr = [];
-  for (const ln of byLine) {
-    if (ln.length > 30) fr.push(ln);
-    const parts = ln.split(/(?<=[.?!])\s+/);
-    for (const p of parts) {
-      const t = p.trim();
-      if (t.length > 30) fr.push(t);
-    }
-  }
-  if (fr.length === 0 && rawText.length > 0) {
-    (rawText.match(/.{1,200}/g) || []).forEach(x => fr.push(x.trim()));
-  }
-  return fr;
-}
-
-// найти в fragments лучший фрагмент, который содержит упоминание варианта (или похожее) и покрывает вопрос
-function scoreOptionAgainstQuestion(option, question, fragments) {
-  const oNorm = normalize(option);
-  const qNorm = normalize(question);
-
-  // 1) Если фрагмент содержит нормализованный вариант, измеряем overlap(question, fragment)
-  let best = { score: 0, frag: "", exact: false };
-
-  for (const frag of fragments) {
-    const fNorm = normalize(frag);
-    // проверяем, содержит ли фрагмент вариант
-    // используем более гибкую проверку: либо fNorm.includes(oNorm) либо все слова варианта встречаются в фNorm
-    let containsOption = false;
-    if (oNorm.length > 3 && fNorm.includes(oNorm)) containsOption = true;
-    else {
-      const words = oNorm.split(' ').filter(Boolean);
-      if (words.length > 0) {
-        let all = true;
-        for (const w of words) {
-          if (!fNorm.includes(w)) { all = false; break; }
-        }
-        if (all) containsOption = true;
-      }
-    }
-    if (!containsOption) continue;
-
-    // если содержит вариант — насколько этот фрагмент релевантен вопросу
-    const overlap = wordOverlapScore(qNorm, fNorm); // 0..1
-    const lev = levenshtein(qNorm.slice(0,200), fNorm.slice(0,200));
-    const normLev = 1 - Math.min(1, lev / Math.max(1, Math.max(qNorm.length, fNorm.length)));
-    // комбинированный скор: сильнее учитываем overlap с вопросом
-    const score = overlap * 0.75 + normLev * 0.25;
-
-    if (score > best.score) best = { score, frag, exact: true };
-  }
-
-  // 2) Если не нашли фрагмент, ищем фрагменты похожие на вариант (по словам) — менее уверенно
-  if (best.score === 0) {
-    for (const frag of fragments) {
-      const fNorm = normalize(frag);
-      const overlapOpt = wordOverlapScore(oNorm, fNorm);
-      if (overlapOpt < 0.3) continue;
-      const overlapQ = wordOverlapScore(qNorm, fNorm);
-      const lev = levenshtein(oNorm.slice(0,200), fNorm.slice(0,200));
-      const normLev = 1 - Math.min(1, lev / Math.max(1, Math.max(oNorm.length, fNorm.length)));
-      const score = overlapOpt * 0.6 + overlapQ * 0.3 + normLev * 0.1;
-      if (score > best.score) best = { score, frag, exact: false };
-    }
-  }
-
-  // 3) final fallback: direct substring of whole pdfText but measure overlap with question
-  if (best.score === 0 && pdfText.includes(oNorm)) {
-    // use small score but not zero
-    const overlap = wordOverlapScore(qNorm, pdfText);
-    best = { score: Math.min(0.45, overlap * 0.8 + 0.1), frag: pdfText.slice(0, 400), exact: false };
-  }
-
-  return best; // {score: 0..1, frag: "...", exact: bool}
-}
-
-// --- улучшенный поиск для открытых вопросов (пропущенное слово) ---
-function findMissingWord(question, fragments) {
-  // 1) Попробуем найти контекст вокруг пропуска: шаблоны "Какое слово пропущено?" и ближайшие фразы
-  // Если в вопросе есть явный ввод "Какое слово пропущено?" — попытаемся найти фразу в PDF, похожую на длинную часть вопроса.
-  const qNorm = normalize(question);
-
-  // Попытаемся выделить фрагмент контекста — берем часть после "Какое слово пропущено?" или фразу вокруг "это"
-  // Ищем короткую часть вопроса (20-120 символов) без метки "Какое слово..."
-  let candidate = question.replace(/Какое слово пропущено|\bОтвет\b.*$/gi, '').trim();
-  if (!candidate || candidate.length < 10) candidate = question;
-
-  // пробуем сопоставить candidate с фрагментами
-  let best = { score: 0, frag: "" };
-  for (const frag of fragments) {
-    const fNorm = normalize(frag);
-    const overlap = wordOverlapScore(normalize(candidate), fNorm);
-    const lev = levenshtein(normalize(candidate).slice(0,200), fNorm.slice(0,200));
-    const normLev = 1 - Math.min(1, lev / Math.max(1, Math.max(candidate.length, fNorm.length)));
-    const score = overlap * 0.75 + normLev * 0.25;
-    if (score > best.score) best = { score, frag };
-  }
-
-  // если ничего — вернём пусто
-  if (best.score < 0.25) return { answer: null, frag: '' };
-
-  // из найденного фрагмента пытаемся извлечь пропущенное слово
-  // пример в PDF: "Статическое электричество - это совокупность явлений..."
-  // ищем шаблоны: "<TERM> это", "<TERM> - это", "<TERM> — это"
-  const frag = best.frag;
-  const m = frag.match(/([А-ЯЁа-яёA-Za-z0-9\-\s]{1,80}?)\s*(?:-|—|–|\:)?\s*это\b/i);
-  if (m && m[1]) {
-    const term = m[1].trim();
-    // возьмём до двух слов (например "Статическое электричество")
-    const words = term.split(/\s+/).filter(Boolean);
-    const candidateAnswer = words.slice(0, 2).join(' ');
-    return { answer: candidateAnswer, frag };
-  }
-
-  // иначе попробуем получить первый набор слов до дефиса/запятой
-  const firstChunk = frag.split(/[.,;:-]/)[0].trim();
-  const words = firstChunk.split(/\s+/).filter(Boolean);
-  const candidateAnswer = words.slice(0, 3).join(' ');
-  return { answer: candidateAnswer, frag };
-}
-
-// --------- маршруты ----------
-
-app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  try {
-    const buf = await fs.promises.readFile(req.file.path);
-    const parsed = await pdfParse(buf);
-    rawPdfText = (parsed.text || '').replace(/\r\n/g, '\n').trim();
-    pdfText = normalize(rawPdfText);
-    fs.unlink(req.file.path, () => {});
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error('PDF parse error', e);
-    return res.status(500).json({ error: 'Failed to parse PDF' });
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const name = Date.now() + '-' + file.originalname.replace(/\s+/g, '_');
+    cb(null, name);
   }
 });
+const upload = multer({ storage }).single('pdf'); // IMPORTANT: field name 'pdf'
 
-app.post('/process-quiz', (req, res) => {
-  const html = req.body.html;
-  if (!html) return res.status(400).json({ error: 'HTML required' });
+// keep last uploaded lecture text in memory (per "session")
+let LECTURE_TEXT = ''; // full text of last uploaded PDF
 
-  const $ = cheerio.load(html);
-  const fragments = makeFragments(rawPdfText);
-  const results = [];
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use('/static', express.static(path.join(__dirname, 'public')));
+app.use('/', express.static(path.join(__dirname, 'public')));
 
-  // найдем блоки вопросов (moodle .que) или fallback: .qtext parent
-  const blocks = $('div.que').length ? $('div.que') : $('.qtext').parent();
+// ---------- utility functions ----------
+function normalizeText(s) {
+  if (!s) return '';
+  return s
+    .replace(/\s+/g, ' ')
+    .replace(/[«»"“”'`·•]/g, '')
+    .trim()
+    .toLowerCase();
+}
 
-  blocks.each((i, block) => {
-    const qtextEl = $(block).find('.qtext').first();
-    const question = (qtextEl.text() || '').trim() || `Вопрос ${i + 1}`;
+function tokenize(s) {
+  s = normalizeText(s);
+  // basic Russian stopwords — small list
+  const stop = new Set(['и','в','во','не','на','по','что','как','к','с','за','из','это','то','а','з','—','…','для','при','от','или','его','ее','она','он','они','быть','есть','бы']);
+  return s.split(/\s+/).filter(t => t && !stop.has(t));
+}
 
-    // сбор вариантов с дедупом (Set) — избавляемся от дублирования
-    const optionSet = new Set();
-    const options = [];
-
-    const answerBlock = $(block).find('.answer').first();
-    if (answerBlock.length) {
-      // соберём текст из label, p, div, span, li
-      answerBlock.find('label, p, div, span, li').each((j, el) => {
-        const t = $(el).text().trim();
-        if (t) {
-          const cleaned = t.replace(/\s+/g, ' ').trim();
-          if (!optionSet.has(cleaned)) {
-            optionSet.add(cleaned);
-            options.push(cleaned);
-          }
-        }
-      });
-
-      // fallback: разделим raw by lines
-      if (options.length === 0) {
-        answerBlock.text().split(/\r?\n/).map(s => s.trim()).filter(Boolean).forEach(s => {
-          const cleaned = s.replace(/\s+/g, ' ').trim();
-          if (!optionSet.has(cleaned)) {
-            optionSet.add(cleaned);
-            options.push(cleaned);
-          }
-        });
-      }
+function uniqStrings(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const a of arr) {
+    const n = a.trim();
+    if (!seen.has(n)) {
+      seen.add(n);
+      out.push(n);
     }
+  }
+  return out;
+}
 
-    if (options.length > 0) {
-      // скорим каждую опцию в контексте вопроса
-      const scored = options.map(opt => {
-        const r = scoreOptionAgainstQuestion(opt, question, fragments);
-        // thresholds: если exact — высокая уверенность
-        const threshold = r.exact ? 0.85 : 0.55;
-        return {
-          text: opt,
-          score: Number((r.score || 0).toFixed(3)),
-          evidence: r.frag || '',
-          exact: !!r.exact,
-          correct: (r.score || 0) >= threshold
-        };
+// find sentences in lecture that contain token overlap
+function splitToSentences(text) {
+  // simple sentence split by .,!?; newline — robust enough
+  return text.split(/(?<=[.!?;])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+}
+
+function scoreSentenceAgainstTokens(sentence, tokens) {
+  const sTokens = new Set(tokenize(sentence));
+  if (!tokens.length) return 0;
+  let common = 0;
+  tokens.forEach(t => { if (sTokens.has(t)) common++; });
+  return common / tokens.length; // fraction matched
+}
+
+// main matching procedure — returns matched snippet(s) and score
+function findBestMatchesForOption(pdfSentences, optionText, questionTokens) {
+  const optTokens = tokenize(optionText);
+  // for each sentence compute combined score: overlap with option + overlap with question
+  const results = pdfSentences.map(s => {
+    const sNorm = s;
+    const scoreOpt = scoreSentenceAgainstTokens(sNorm, optTokens);
+    const scoreQ = scoreSentenceAgainstTokens(sNorm, questionTokens);
+    // weigh option matches more (we want text supporting option)
+    const score = scoreOpt * 0.7 + scoreQ * 0.3;
+    return { sentence: sNorm, score, scoreOpt, scoreQ };
+  });
+  // sort by score desc
+  results.sort((a,b) => b.score - a.score);
+  // return top N non-empty
+  const top = results.filter(r => r.score > 0).slice(0, 3);
+  return top;
+}
+
+// try to answer short answer by definitions in PDF like "X - это ..." or "X — это ..."
+function findShortAnswer(pdfText, questionText) {
+  const sentences = splitToSentences(pdfText);
+  // look for pattern "<term> - это" or "<term> — это" at sentence start
+  for (const s of sentences) {
+    const m = s.match(/^(.{1,60}?)\s*[-—–:]\s*это\b/i);
+    if (m) {
+      let term = m[1].trim();
+      // remove trailing stopwords/punctuation
+      term = term.replace(/[:;,.!?]$/,'').trim();
+      if (term) return { answer: term, snippet: s };
+    }
+  }
+  // fallback: search for phrase "это <something> - " and try to extract following noun
+  // e.g. "Статическое электричество - это совокупность явлений..."
+  // alternatively look for lines that contain question keywords and nearby noun
+  return null;
+}
+
+// parse HTML to questions array
+function parseQuizHtml(html) {
+  const $ = cheerio.load(html);
+  const questions = [];
+  // each question block in Moodle uses class .que or element id starting with "question-"
+  $('div.que').each((i, el) => {
+    const q = {};
+    const $el = $(el);
+    // question text
+    const qtext = $el.find('.qtext').text().trim();
+    q.text = qtext || $el.find('h4').text().trim() || `Вопрос ${i+1}`;
+    // detect short answer (has input[type=text]) or multichoice (has inputs checkboxes/radios)
+    const inputs = $el.find('input');
+    const textInput = $el.find('input[type="text"], textarea').first();
+    if (textInput.length) {
+      q.type = 'shortanswer';
+      q.options = []; // no options
+    } else {
+      q.type = 'multichoice';
+      // collect visible option labels
+      const opts = [];
+      // Moodle wraps options with .answer or labels; try to get meaningful texts
+      $el.find('.answer .r0, .answer .r1, li, .answer > div').each((ii, op) => {
+        const optText = $(op).text().replace(/\s+/g,' ').trim();
+        if (optText) opts.push(optText);
       });
-
-      // решаем, единственный ли правильный: если max >> second_max (gap), считаем единственным
-      const scores = scored.map(s => s.score);
-      const sorted = [...scores].sort((a,b)=>b-a);
-      const max = sorted[0]||0;
-      const second = sorted[1]||0;
-      const gap = max - second;
-
-      // если есть яркий победитель (gap > 0.15 и max >= 0.6), пометить только его
-      if (gap > 0.15 && max >= 0.6) {
-        scored.forEach(s => s.correct = (s.score === max));
-      } else {
-        // иначе используем per-option threshold (уже выставлено), но не показываем evidence если score маленький
-        scored.forEach(s => {
-          if (s.score < 0.2) {
-            s.correct = false;
-            s.evidence = ''; // убираем бессмысленное evidence
-          }
+      // fallback: find inputs and their aria-labelledby
+      if (!opts.length) {
+        $el.find('input[type="checkbox"], input[type="radio"]').each((ii, inp) => {
+          const id = $(inp).attr('id');
+          let label = '';
+          if (id) label = $(`[id="${id}_label"]`).text().trim();
+          if (!label) label = $(`label[for="${id}"]`).text().trim();
+          if (label) opts.push(label);
         });
       }
-
-      results.push({ type: 'choice', question, answers: scored });
-    } else {
-      // открытый вопрос — попытка найти пропущенное слово
-      const open = findMissingWord(question, fragments);
-      results.push({
-        type: 'open',
-        question,
-        answer: open.answer || 'Ответ не найден',
-        evidence: open.frag || '',
-        confidence: open.answer ? 0.7 : 0
+      // final clean and dedupe
+      q.options = uniqStrings(opts.map(s => s.replace(/\s+/g,' ').trim()));
+    }
+    questions.push(q);
+  });
+  // If no .que found (different markup), fallback: scan for <fieldset> with legend "Ответ"
+  if (!questions.length) {
+    $('fieldset').each((i, el) => {
+      const q = {};
+      const $el = $(el);
+      const qtext = $el.prevAll('.qtext').first().text().trim() || $el.prev('p').text().trim();
+      q.text = qtext || `Вопрос ${i+1}`;
+      const options = [];
+      $el.find('p, div').each((ii, op) => {
+        const t = $(op).text().trim();
+        if (t) options.push(t);
       });
+      if (options.length) {
+        q.type = 'multichoice';
+        q.options = uniqStrings(options);
+      } else {
+        q.type = 'shortanswer';
+        q.options = [];
+      }
+      questions.push(q);
+    });
+  }
+  return questions;
+}
+
+// ---------- routes ----------
+
+// upload PDF and parse to LECTURE_TEXT
+app.post('/upload-pdf', (req, res) => {
+  upload(req, res, async function(err) {
+    if (err) {
+      console.error('Upload error', err);
+      return res.status(400).json({ ok: false, error: String(err) });
+    }
+    if (!req.file) return res.status(400).json({ ok: false, error: 'No file' });
+    try {
+      const dataBuffer = fs.readFileSync(req.file.path);
+      const pdfData = await pdfParse(dataBuffer);
+      const text = pdfData.text || '';
+      LECTURE_TEXT = text;
+      // optionally remove file to save disk
+      try { fs.unlinkSync(req.file.path); } catch(e){}
+      return res.json({ ok: true, textSnippet: text.slice(0, 1000) });
+    } catch (e) {
+      console.error('pdf parse error', e);
+      return res.status(500).json({ ok: false, error: String(e) });
+    }
+  });
+});
+
+// process quiz HTML: parse questions and attempt to find answers using LECTURE_TEXT
+app.post('/process-quiz', (req, res) => {
+  const { html } = req.body;
+  if (!html) return res.status(400).json({ error: 'No html provided' });
+  if (!LECTURE_TEXT) return res.status(400).json({ error: 'Upload PDF first' });
+
+  const pdfText = LECTURE_TEXT;
+  const pdfSentences = splitToSentences(pdfText);
+
+  const questions = parseQuizHtml(html);
+
+  const results = questions.map((q) => {
+    const qTokens = tokenize(q.text);
+    if (q.type === 'shortanswer') {
+      // try to find definition pattern
+      const def = findShortAnswer(pdfText, q.text);
+      if (def) {
+        return {
+          type: q.type,
+          question: q.text,
+          answer: def.answer,
+          confidence: 0.95,
+          snippet: def.snippet
+        };
+      }
+      // fallback: search sentences that contain many question tokens and return a short phrase from sentence
+      const scored = pdfSentences.map(s => ({ s, score: scoreSentenceAgainstTokens(s, qTokens) }));
+      scored.sort((a,b) => b.score - a.score);
+      const best = scored[0];
+      if (best && best.score > 0) {
+        // attempt to extract a candidate word: find pattern "— это" or "- это"
+        const m = best.s.match(/([А-ЯЁA-Я][А-Яа-яё\-]{2,40})\s*[-—–:]\s*это/i);
+        const candidate = m ? m[1] : null;
+        return {
+          type: q.type,
+          question: q.text,
+          answer: candidate || best.s.slice(0, 60),
+          confidence: candidate ? 0.9 : Math.min(0.7, best.score),
+          snippet: best.s
+        };
+      }
+      return { type: q.type, question: q.text, answer: null, confidence: 0, snippet: null };
+    } else {
+      // multichoice
+      const opts = q.options || [];
+      const optionResults = opts.map(opt => {
+        const matches = findBestMatchesForOption(pdfSentences, opt, qTokens);
+        let bestSnippet = matches.length ? matches[0].sentence : '';
+        let bestScore = matches.length ? matches[0].score : 0;
+        // also check exact substring presence (case-insensitive)
+        const nOpt = normalizeText(opt);
+        const exactFound = pdfText.toLowerCase().includes(nOpt);
+        if (exactFound && bestScore < 0.5) bestScore = Math.max(bestScore, 0.6);
+        return { option: opt, score: bestScore, foundSnippet: bestSnippet, matches };
+      });
+
+      // decide which to mark as correct:
+      // heuristic: if one option has score >> others, pick it (single-best)
+      // if several have high scores >=0.5, pick them all (multi-select)
+      const scores = optionResults.map(o => o.score);
+      const maxScore = Math.max(...scores, 0);
+      let chosen = [];
+      if (maxScore >= 0.55) {
+        // choose all with score >= 0.55
+        chosen = optionResults.filter(o => o.score >= 0.55);
+      } else if (maxScore >= 0.35) {
+        // if multiple close to max, choose those within 0.15 of max
+        chosen = optionResults.filter(o => (maxScore - o.score) <= 0.15 && o.score > 0.25);
+        if (!chosen.length) {
+          chosen = optionResults.sort((a,b)=>b.score-a.score).slice(0,1);
+        }
+      } else {
+        // low confidence: choose top1 if any small signal
+        const top = optionResults.sort((a,b)=>b.score-a.score)[0];
+        if (top && top.score > 0.15) chosen = [top];
+        else chosen = [];
+      }
+
+      // assemble result per option with highlight flag
+      const annotatedOptions = optionResults.map(o => ({
+        text: o.option,
+        score: +(o.score.toFixed(3)),
+        snippet: o.foundSnippet,
+        predicted_correct: chosen.some(c => c.option === o.option)
+      }));
+
+      return {
+        type: q.type,
+        question: q.text,
+        options: annotatedOptions
+      };
     }
   });
 
-  return res.json({ results });
+  return res.json({ ok: true, results });
 });
 
-app.get('/ping', (_, res) => res.send('pong'));
+// small health
+app.get('/health', (req, res) => res.json({ ok: true }));
 
-app.listen(port, () => console.log('Server running on port', port));
+// serve index
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
